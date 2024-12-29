@@ -43,12 +43,14 @@ class GhostBSDMediaCreator(Gtk.Window):
         self.desktop_label = Gtk.Label(label="Choose GhostBSD Desktop:")
         vbox.pack_start(self.desktop_label, True, True, 0)
 
-        # Dropdown for desktop choice
-        self.desktop_combo = Gtk.ComboBoxText()
-        self.desktop_combo.append_text("MATE")
-        self.desktop_combo.append_text("XFCE")
-        self.desktop_combo.set_active(0)
-        vbox.pack_start(self.desktop_combo, True, True, 0)
+        # Checkboxes for desktop choice
+        self.mate_checkbox = Gtk.CheckButton(label="MATE")
+        self.mate_checkbox.connect("toggled", self.on_checkbox_toggled, "MATE")
+        vbox.pack_start(self.mate_checkbox, True, True, 0)
+
+        self.xfce_checkbox = Gtk.CheckButton(label="XFCE")
+        self.xfce_checkbox.connect("toggled", self.on_checkbox_toggled, "XFCE")
+        vbox.pack_start(self.xfce_checkbox, True, True, 0)
 
         # Button to proceed
         self.proceed_button = Gtk.Button(label="Next")
@@ -58,6 +60,19 @@ class GhostBSDMediaCreator(Gtk.Window):
         self.media_label = Gtk.Label(label="")
         self.media_combo = Gtk.ComboBoxText()
         self.install_button = Gtk.Button(label="Install")
+
+        self.selected_desktop = None
+
+    def on_checkbox_toggled(self, checkbox, desktop):
+        if checkbox.get_active():
+            self.selected_desktop = desktop
+            if desktop == "MATE":
+                self.xfce_checkbox.set_active(False)
+            elif desktop == "XFCE":
+                self.mate_checkbox.set_active(False)
+        else:
+            if self.selected_desktop == desktop:
+                self.selected_desktop = None
 
     def check_dependencies(self):
         required_tools = ["wget", "dd", "umount"]
@@ -86,8 +101,12 @@ class GhostBSDMediaCreator(Gtk.Window):
         return "Unknown platform. Please install the required tool manually."
 
     def on_proceed_clicked(self, widget):
-        desktop_choice = self.desktop_combo.get_active_text()
-        self.desktop_label.set_text(f"You chose {desktop_choice} desktop.")
+        if not self.selected_desktop:
+            self.show_error("No Desktop Selected", "Please select a desktop environment to proceed.")
+            logging.warning("No desktop selected")
+            return
+
+        self.desktop_label.set_text(f"You chose {self.selected_desktop} desktop.")
         try:
             self.list_media_devices()
         except Exception as e:
@@ -126,7 +145,6 @@ class GhostBSDMediaCreator(Gtk.Window):
         self.show_all()
 
     def on_install_clicked(self, widget):
-        desktop_choice = self.desktop_combo.get_active_text()
         target_media = self.media_combo.get_active_text()
 
         if not target_media:
@@ -134,11 +152,11 @@ class GhostBSDMediaCreator(Gtk.Window):
             logging.warning("No target media selected")
             return
 
-        if desktop_choice == "MATE":
+        if self.selected_desktop == "MATE":
             iso_url = "https://download.ghostbsd.org/releases/amd64/24.10.1/GhostBSD-24.10.1.iso"
-        elif desktop_choice == "XFCE":
+        elif self.selected_desktop == "XFCE":
             iso_url = "https://download.ghostbsd.org/releases/amd64/24.10.1/GhostBSD-24.10.1-XFCE.iso"
-        iso_file = f"/tmp/ghostbsd-{desktop_choice.lower()}.iso"
+        iso_file = f"/tmp/ghostbsd-{self.selected_desktop.lower()}.iso"
 
         try:
             # Unmount media
@@ -159,7 +177,7 @@ class GhostBSDMediaCreator(Gtk.Window):
 
             # Notify user
             dialog = Gtk.MessageDialog(self, 0, Gtk.MessageType.INFO, Gtk.ButtonsType.OK, "Installation complete!")
-            dialog.format_secondary_text(f"GhostBSD {desktop_choice} has been installed on {target_media}.")
+            dialog.format_secondary_text(f"GhostBSD {self.selected_desktop} has been installed on {target_media}.")
             dialog.run()
             dialog.destroy()
 
