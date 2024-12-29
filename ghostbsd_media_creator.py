@@ -4,12 +4,17 @@ import subprocess
 import shutil
 import logging
 import gi
+
+gi.require_version('Gtk', '3.0')
 from gi.repository import Gtk
 
 class GhostBSDMediaCreator(Gtk.Window):
     def __init__(self):
         super().__init__(title="GhostBSD Media Creator")
-        self.set_border_width(10)
+        self.set_margin_start(10)
+        self.set_margin_end(10)
+        self.set_margin_top(10)
+        self.set_margin_bottom(10)
 
         # Configure logging
         logging.basicConfig(filename='/var/log/ghostbsd_media_creator.log', level=logging.INFO,
