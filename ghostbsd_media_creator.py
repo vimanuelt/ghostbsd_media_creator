@@ -4,9 +4,10 @@ import subprocess
 import shutil
 import logging
 import gi
+import threading
 
 gi.require_version('Gtk', '3.0')
-from gi.repository import Gtk
+from gi.repository import Gtk, GLib
 
 class GhostBSDMediaCreator(Gtk.Window):
     def __init__(self):
@@ -36,32 +37,56 @@ class GhostBSDMediaCreator(Gtk.Window):
             exit(1)
 
         # Create a vertical box layout
-        vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        self.add(vbox)
+        self.vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        self.add(self.vbox)
+
+        # Add main content box for controls
+        self.content_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        self.vbox.pack_start(self.content_box, True, True, 0)
 
         # Label for desktop choice
         self.desktop_label = Gtk.Label(label="Choose GhostBSD Desktop:")
-        vbox.pack_start(self.desktop_label, True, True, 0)
+        self.content_box.pack_start(self.desktop_label, False, False, 0)
 
         # Checkboxes for desktop choice
         self.mate_checkbox = Gtk.CheckButton(label="MATE")
         self.mate_checkbox.connect("toggled", self.on_checkbox_toggled, "MATE")
-        vbox.pack_start(self.mate_checkbox, True, True, 0)
+        self.content_box.pack_start(self.mate_checkbox, False, False, 0)
 
         self.xfce_checkbox = Gtk.CheckButton(label="XFCE")
         self.xfce_checkbox.connect("toggled", self.on_checkbox_toggled, "XFCE")
-        vbox.pack_start(self.xfce_checkbox, True, True, 0)
+        self.content_box.pack_start(self.xfce_checkbox, False, False, 0)
 
         # Button to proceed
         self.proceed_button = Gtk.Button(label="Next")
         self.proceed_button.connect("clicked", self.on_proceed_clicked)
-        vbox.pack_start(self.proceed_button, True, True, 0)
+        self.content_box.pack_start(self.proceed_button, False, False, 0)
 
+        # Media devices
         self.media_label = Gtk.Label(label="")
-        self.media_combo = Gtk.ComboBoxText()
+        self.media_label.hide()  # Initially hidden
+        self.content_box.pack_start(self.media_label, False, False, 0)
+
+        self.device_checkboxes = []
+
+        # Progress bar
+        self.progress_bar = Gtk.ProgressBar()
+        self.progress_bar.hide()  # Initially hidden
+        self.content_box.pack_start(self.progress_bar, False, False, 0)
+
+        # Status label
+        self.status_label = Gtk.Label(label="Status: Waiting for input...")
+        self.content_box.pack_start(self.status_label, False, False, 0)
+
+        # Add Install button at the bottom
         self.install_button = Gtk.Button(label="Install")
+        self.install_button.connect("clicked", self.on_install_clicked)
+        self.install_button.set_sensitive(False)
+        self.install_button.hide()  # Initially hidden
+        self.vbox.pack_end(self.install_button, False, False, 0)
 
         self.selected_desktop = None
+        self.selected_device = None
 
     def on_checkbox_toggled(self, checkbox, desktop):
         if checkbox.get_active():
@@ -109,6 +134,15 @@ class GhostBSDMediaCreator(Gtk.Window):
         self.desktop_label.set_text(f"You chose {self.selected_desktop} desktop.")
         try:
             self.list_media_devices()
+            # Ensure the media label and device checkboxes are shown
+            self.media_label.set_text("Choose target media:")
+            self.media_label.show()
+            for checkbox in self.device_checkboxes:
+                checkbox.show()
+            self.install_button.show()  # Show the install button only now
+
+            # Hide the "Next" button after it is pressed
+            self.proceed_button.hide()
         except Exception as e:
             self.show_error("Failed to list media devices", str(e))
             logging.error(f"Error listing media devices: {e}")
@@ -119,74 +153,97 @@ class GhostBSDMediaCreator(Gtk.Window):
 
         try:
             if os_name == "Linux":
-                result = subprocess.run(["lsblk", "-nd", "-o", "NAME"], stdout=subprocess.PIPE, text=True, check=True)
-                devices = result.stdout.strip().split("\n")
-            elif os_name == "FreeBSD" or os_name == "GhostBSD":
+                result = subprocess.run(["lsblk", "-nd", "-o", "NAME,SIZE,TYPE"], stdout=subprocess.PIPE, text=True, check=True)
+                devices = [line for line in result.stdout.strip().split("\n") if "disk" in line]
+            elif os_name in ["FreeBSD", "GhostBSD"]:
                 result = subprocess.run(["geom", "disk", "list"], stdout=subprocess.PIPE, text=True, check=True)
-                devices = [line.split()[1] for line in result.stdout.splitlines() if line.startswith("Geom name:")]
-            elif os_name == "Darwin":  # macOS
+                geom_output = result.stdout.splitlines()
+                for i, line in enumerate(geom_output):
+                    if line.startswith("Geom name:"):
+                        name = line.split(":")[1].strip()
+                        size = "Unknown"
+                        descr = "Unknown"
+                        for j in range(i + 1, len(geom_output)):
+                            if geom_output[j].strip().startswith("Mediasize:"):
+                                size = geom_output[j].split(":")[1].split("(")[1].split(")")[0]
+                            if geom_output[j].strip().startswith("descr:"):
+                                descr = geom_output[j].split(":")[1].strip()
+                            if geom_output[j].strip() == "":
+                                break
+                        devices.append(f"{name} ({size}, {descr})")
+            elif os_name == "Darwin":
                 result = subprocess.run(["diskutil", "list"], stdout=subprocess.PIPE, text=True, check=True)
-                devices = [line.split()[0] for line in result.stdout.splitlines() if line.startswith("/dev/disk")]
+                devices = [
+                    f"{line.split()[0]} ({' '.join(line.split()[1:])})"
+                    for line in result.stdout.splitlines()
+                    if line.startswith("/dev/disk")
+                ]
+            else:
+                self.show_error("Unsupported OS", f"{os_name} is not supported for this operation.")
+                return
         except subprocess.CalledProcessError as e:
-            raise RuntimeError(f"Error listing media devices: {e}")
-
-        # Update UI
-        self.media_label.set_text("Choose target media:")
-        for device in devices:
-            self.media_combo.append_text(device)
-        self.media_combo.set_active(0)
-
-        self.install_button.connect("clicked", self.on_install_clicked)
-
-        # Add new UI elements
-        self.add(self.media_label)
-        self.add(self.media_combo)
-        self.add(self.install_button)
-        self.show_all()
-
-    def on_install_clicked(self, widget):
-        target_media = self.media_combo.get_active_text()
-
-        if not target_media:
-            self.show_error("No Media Selected", "Please select a target media to proceed.")
-            logging.warning("No target media selected")
+            self.show_error("Device Detection Error", f"Error detecting devices: {e}")
             return
 
-        if self.selected_desktop == "MATE":
-            iso_url = "https://download.ghostbsd.org/releases/amd64/24.10.1/GhostBSD-24.10.1.iso"
-        elif self.selected_desktop == "XFCE":
-            iso_url = "https://download.ghostbsd.org/releases/amd64/24.10.1/GhostBSD-24.10.1-XFCE.iso"
+        # Clear existing checkboxes
+        for checkbox in self.device_checkboxes:
+            self.content_box.remove(checkbox)
+
+        # Add new device checkboxes
+        self.device_checkboxes = []
+        for device in devices:
+            checkbox = Gtk.CheckButton(label=device)
+            checkbox.connect("toggled", self.on_device_toggled, device.split()[0])
+            self.device_checkboxes.append(checkbox)
+            self.content_box.pack_start(checkbox, False, False, 0)
+
+    def on_device_toggled(self, checkbox, device):
+        if checkbox.get_active():
+            self.selected_device = device
+            for cb in self.device_checkboxes:
+                if cb.get_label().split()[0] != device:
+                    cb.set_active(False)
+            self.install_button.set_sensitive(True)
+        else:
+            if self.selected_device == device:
+                self.selected_device = None
+                self.install_button.set_sensitive(False)
+
+    def on_install_clicked(self, widget):
+        if not self.selected_device:
+            self.show_error("No Media Selected", "Please select a target media to proceed.")
+            return
+
+        threading.Thread(target=self.perform_installation).start()
+
+    def perform_installation(self):
+        iso_url = f"https://download.ghostbsd.org/releases/amd64/24.10.1/GhostBSD-24.10.1-{self.selected_desktop}.iso"
         iso_file = f"/tmp/ghostbsd-{self.selected_desktop.lower()}.iso"
+        device_path = f"/dev/{self.selected_device}"
 
         try:
-            # Unmount media
-            subprocess.run(["umount", f"/dev/{target_media}"], stderr=subprocess.DEVNULL, check=True)
-            logging.info(f"Unmounted {target_media}")
+            # Update status: Unmounting
+            GLib.idle_add(self.update_status, "Unmounting target media...")
+            subprocess.run(["umount", device_path], check=True)
 
-            # Wipe media
-            subprocess.run(["dd", "if=/dev/zero", f"of=/dev/{target_media}", "bs=1M", "count=1"], stderr=subprocess.DEVNULL, check=True)
-            logging.info(f"Wiped {target_media}")
+            # Update status: Wiping media
+            GLib.idle_add(self.update_status, "Wiping target media...")
+            subprocess.run(["dd", "if=/dev/zero", f"of={device_path}", "bs=1M", "count=1"], check=True)
 
-            # Fetch ISO
+            # Update status: Downloading ISO
+            GLib.idle_add(self.update_status, "Downloading GhostBSD ISO...")
             subprocess.run(["wget", "-O", iso_file, iso_url], check=True)
-            logging.info(f"Downloaded ISO from {iso_url} to {iso_file}")
 
-            # Burn ISO
-            subprocess.run(["dd", f"if={iso_file}", f"of=/dev/{target_media}", "bs=4M", "status=progress"], check=True)
-            logging.info(f"Burned ISO to {target_media}")
+            # Update status: Writing ISO
+            GLib.idle_add(self.update_status, "Writing ISO to target media...")
+            subprocess.run(["dd", f"if={iso_file}", f"of={device_path}", "bs=4M", "status=progress"], check=True)
 
-            # Notify user
-            dialog = Gtk.MessageDialog(self, 0, Gtk.MessageType.INFO, Gtk.ButtonsType.OK, "Installation complete!")
-            dialog.format_secondary_text(f"GhostBSD {self.selected_desktop} has been installed on {target_media}.")
-            dialog.run()
-            dialog.destroy()
-
+            GLib.idle_add(self.update_status, "Installation complete!")
         except subprocess.CalledProcessError as e:
-            self.show_error("Installation Error", f"An error occurred: {e}")
-            logging.error(f"Installation error: {e}")
-        except Exception as e:
-            self.show_error("Unexpected Error", str(e))
-            logging.error(f"Unexpected error: {e}")
+            GLib.idle_add(self.show_error, "Error", str(e))
+
+    def update_status(self, message):
+        self.status_label.set_text(f"Status: {message}")
 
     def show_error(self, title, message):
         dialog = Gtk.MessageDialog(self, 0, Gtk.MessageType.ERROR, Gtk.ButtonsType.OK, title)
@@ -200,3 +257,4 @@ if __name__ == "__main__":
     app.connect("destroy", Gtk.main_quit)
     app.show_all()
     Gtk.main()
+
