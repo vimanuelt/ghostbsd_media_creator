@@ -5,6 +5,7 @@ import shutil
 import logging
 import gi
 import threading
+import time
 
 gi.require_version('Gtk', '3.0')
 from gi.repository import Gtk, GLib
@@ -74,16 +75,16 @@ class GhostBSDMediaCreator(Gtk.Window):
         self.progress_bar.hide()  # Initially hidden
         self.content_box.pack_start(self.progress_bar, False, False, 0)
 
-        # Status label
-        self.status_label = Gtk.Label(label="Status: Waiting for input...")
-        self.content_box.pack_start(self.status_label, False, False, 0)
-
         # Add Install button at the bottom
         self.install_button = Gtk.Button(label="Install")
         self.install_button.connect("clicked", self.on_install_clicked)
         self.install_button.set_sensitive(False)
         self.install_button.hide()  # Initially hidden
-        self.vbox.pack_end(self.install_button, False, False, 0)
+        self.vbox.pack_start(self.install_button, False, False, 0)
+
+        # Status label at the bottom
+        self.status_label = Gtk.Label(label="Status: Waiting for input...")
+        self.vbox.pack_start(self.status_label, False, False, 0)
 
         self.selected_desktop = None
         self.selected_device = None
@@ -214,17 +215,31 @@ class GhostBSDMediaCreator(Gtk.Window):
             self.show_error("No Media Selected", "Please select a target media to proceed.")
             return
 
+        # Hide the Install button
+        self.install_button.hide()
+
+        # Start installation in a separate thread
         threading.Thread(target=self.perform_installation).start()
 
     def perform_installation(self):
-        iso_url = f"https://download.ghostbsd.org/releases/amd64/24.10.1/GhostBSD-24.10.1-{self.selected_desktop}.iso"
+        # Correct ISO URLs
+        if self.selected_desktop == "MATE":
+            iso_url = "https://download.ghostbsd.org/releases/amd64/24.10.1/GhostBSD-24.10.1.iso"
+        elif self.selected_desktop == "XFCE":
+            iso_url = "https://download.ghostbsd.org/releases/amd64/24.10.1/GhostBSD-24.10.1-XFCE.iso"
         iso_file = f"/tmp/ghostbsd-{self.selected_desktop.lower()}.iso"
         device_path = f"/dev/{self.selected_device}"
 
         try:
             # Update status: Unmounting
             GLib.idle_add(self.update_status, "Unmounting target media...")
-            subprocess.run(["umount", device_path], check=True)
+            result = subprocess.run(["umount", device_path], stderr=subprocess.PIPE, text=True)
+            if result.returncode != 0:
+                if "not mounted" in result.stderr.lower() or "unknown file system" in result.stderr.lower():
+                    logging.warning(f"{device_path} is not mounted or has an unknown file system; skipping unmount.")
+                    GLib.idle_add(self.update_status, f"{device_path} is not mounted or has an unknown file system; skipping unmount.")
+                else:
+                    raise RuntimeError(f"Failed to unmount {device_path}: {result.stderr.strip()}")
 
             # Update status: Wiping media
             GLib.idle_add(self.update_status, "Wiping target media...")
@@ -232,13 +247,22 @@ class GhostBSDMediaCreator(Gtk.Window):
 
             # Update status: Downloading ISO
             GLib.idle_add(self.update_status, "Downloading GhostBSD ISO...")
-            subprocess.run(["wget", "-O", iso_file, iso_url], check=True)
+            for attempt in range(3):  # Retry 3 times
+                try:
+                    subprocess.run(["wget", "-O", iso_file, iso_url], check=True)
+                    break
+                except subprocess.CalledProcessError:
+                    if attempt == 2:
+                        raise
+                    time.sleep(5)  # Wait before retrying
 
             # Update status: Writing ISO
             GLib.idle_add(self.update_status, "Writing ISO to target media...")
             subprocess.run(["dd", f"if={iso_file}", f"of={device_path}", "bs=4M", "status=progress"], check=True)
 
             GLib.idle_add(self.update_status, "Installation complete!")
+        except RuntimeError as e:
+            GLib.idle_add(self.show_error, "Error", str(e))
         except subprocess.CalledProcessError as e:
             GLib.idle_add(self.show_error, "Error", str(e))
 
