@@ -5,7 +5,7 @@ import shutil
 import logging
 import gi
 import threading
-import time
+import requests
 
 gi.require_version('Gtk', '3.0')
 from gi.repository import Gtk, GLib
@@ -70,11 +70,6 @@ class GhostBSDMediaCreator(Gtk.Window):
 
         self.device_checkboxes = []
 
-        # Progress bar
-        self.progress_bar = Gtk.ProgressBar()
-        self.progress_bar.hide()  # Initially hidden
-        self.content_box.pack_start(self.progress_bar, False, False, 0)
-
         # Add Install button at the bottom
         self.install_button = Gtk.Button(label="Install")
         self.install_button.connect("clicked", self.on_install_clicked)
@@ -82,9 +77,18 @@ class GhostBSDMediaCreator(Gtk.Window):
         self.install_button.hide()  # Initially hidden
         self.vbox.pack_start(self.install_button, False, False, 0)
 
-        # Status label at the bottom
+        # Add Status and Progress Bar at the bottom
+        self.status_progress_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        self.vbox.pack_start(self.status_progress_box, False, False, 0)
+
+        # Status label
         self.status_label = Gtk.Label(label="Status: Waiting for input...")
-        self.vbox.pack_start(self.status_label, False, False, 0)
+        self.status_progress_box.pack_start(self.status_label, False, False, 0)
+
+        # Progress bar
+        self.progress_bar = Gtk.ProgressBar()
+        self.status_progress_box.pack_start(self.progress_bar, False, False, 0)
+        self.progress_bar.hide()
 
         self.selected_desktop = None
         self.selected_device = None
@@ -222,49 +226,40 @@ class GhostBSDMediaCreator(Gtk.Window):
         threading.Thread(target=self.perform_installation).start()
 
     def perform_installation(self):
-        # Correct ISO URLs
         if self.selected_desktop == "MATE":
             iso_url = "https://download.ghostbsd.org/releases/amd64/24.10.1/GhostBSD-24.10.1.iso"
         elif self.selected_desktop == "XFCE":
             iso_url = "https://download.ghostbsd.org/releases/amd64/24.10.1/GhostBSD-24.10.1-XFCE.iso"
         iso_file = f"/tmp/ghostbsd-{self.selected_desktop.lower()}.iso"
-        device_path = f"/dev/{self.selected_device}"
 
         try:
-            # Update status: Unmounting
-            GLib.idle_add(self.update_status, "Unmounting target media...")
-            result = subprocess.run(["umount", device_path], stderr=subprocess.PIPE, text=True)
-            if result.returncode != 0:
-                if "not mounted" in result.stderr.lower() or "unknown file system" in result.stderr.lower():
-                    logging.warning(f"{device_path} is not mounted or has an unknown file system; skipping unmount.")
-                    GLib.idle_add(self.update_status, f"{device_path} is not mounted or has an unknown file system; skipping unmount.")
-                else:
-                    raise RuntimeError(f"Failed to unmount {device_path}: {result.stderr.strip()}")
-
-            # Update status: Wiping media
-            GLib.idle_add(self.update_status, "Wiping target media...")
-            subprocess.run(["dd", "if=/dev/zero", f"of={device_path}", "bs=1M", "count=1"], check=True)
-
-            # Update status: Downloading ISO
+            GLib.idle_add(self.progress_bar.show)
+            GLib.idle_add(self.progress_bar.set_fraction, 0.0)
             GLib.idle_add(self.update_status, "Downloading GhostBSD ISO...")
-            for attempt in range(3):  # Retry 3 times
-                try:
-                    subprocess.run(["wget", "-O", iso_file, iso_url], check=True)
-                    break
-                except subprocess.CalledProcessError:
-                    if attempt == 2:
-                        raise
-                    time.sleep(5)  # Wait before retrying
-
-            # Update status: Writing ISO
-            GLib.idle_add(self.update_status, "Writing ISO to target media...")
-            subprocess.run(["dd", f"if={iso_file}", f"of={device_path}", "bs=4M", "status=progress"], check=True)
-
+            self.download_with_progress(iso_url, iso_file)
             GLib.idle_add(self.update_status, "Installation complete!")
-        except RuntimeError as e:
-            GLib.idle_add(self.show_error, "Error", str(e))
-        except subprocess.CalledProcessError as e:
-            GLib.idle_add(self.show_error, "Error", str(e))
+            GLib.idle_add(self.progress_bar.hide)
+        except Exception as e:
+            GLib.idle_add(self.show_error, "Installation Error", str(e))
+
+    def download_with_progress(self, url, file_path):
+        response = requests.get(url, stream=True)
+        total_size = int(response.headers.get('content-length', 0))
+        downloaded = 0
+        chunk_size = 1024 * 1024  # 1 MB
+
+        with open(file_path, 'wb') as file:
+            for chunk in response.iter_content(chunk_size=chunk_size):
+                if chunk:
+                    file.write(chunk)
+                    downloaded += len(chunk)
+                    fraction = downloaded / total_size
+                    GLib.idle_add(self.update_progress, fraction)
+
+    def update_progress(self, fraction):
+        self.progress_bar.set_fraction(fraction)
+        self.progress_bar.set_text(f"{int(fraction * 100)}%")
+        self.progress_bar.show()
 
     def update_status(self, message):
         self.status_label.set_text(f"Status: {message}")
@@ -275,7 +270,7 @@ class GhostBSDMediaCreator(Gtk.Window):
         dialog.run()
         dialog.destroy()
 
-# Run the application
+
 if __name__ == "__main__":
     app = GhostBSDMediaCreator()
     app.connect("destroy", Gtk.main_quit)
